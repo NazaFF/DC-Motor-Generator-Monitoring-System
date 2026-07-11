@@ -365,6 +365,31 @@ Here are some of the images of the progress of the project:
 
 ![Language](https://img.shields.io/badge/Language-C%2B%2B-orange)
 
+# License
+
+This project is licensed under the MIT License. See the LICENSE file for more information.
+# Author
+
+**Tomás Ferreira**
+
+Electrical & Telecommunications Engineering Student  
+University of Aveiro
+
+Areas of Interest:
+- Industrial Automation
+- Embedded Systems
+- Robotics
+- Control Engineering
+- Electronics
+- Industry 4.0
+
+## Contact
+- Email: ferreiratomas994@gmail.com
+- Outlkook tomasff52@ua.pt
+- LinkedIn: (https://www.linkedin.com/in/tomas-ferreira-52635a2b8/?isSelfProfile=true)
+- GitHub: https://github.com/teu-utilizador
+
+
 
 <img width="1536" height="2048" alt="WhatsApp Image 2026-07-11 at 16 36 12 (1)" src="https://github.com/user-attachments/assets/b15caf7b-5eb3-4511-9c9f-6704e003cbb4" />
 
