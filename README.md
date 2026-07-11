@@ -353,6 +353,8 @@ Interested in:
 
 Feel free to explore my other engineering projects and connect with me on LinkedIn.
 
+Here are some of the images of the progress of the project:
+
 ![Project Status](https://img.shields.io/badge/Status-Completed-success)
 
 <img width="1536" height="2048" alt="WhatsApp Image 2026-07-11 at 16 36 11" src="https://github.com/user-attachments/assets/bcb6544f-d900-47cd-97e0-d10b72d2f42c" />
