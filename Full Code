@@ -1,0 +1,835 @@
+Implemented Code ( I used Arduino IDE ) 
+
+/*
+  Projeto Motor/Gerador com Arduino Nano ESP32
+  ------------------------------------------------------------
+  Objetivo:
+  - Controlar dois motores DC mecanicamente acoplados.
+  - Ligar/desligar cada motor por botão físico ou por Serial.
+  - Medir tensão, corrente e potência elétrica em ambos os motores.
+  - Identificar automaticamente o estado: MOTOR, GERADOR ou PARADO.
+
+  Comandos Serial:
+  1       -> Alterna Motor A entre PWM 240 e OFF
+  2       -> Alterna Motor B entre PWM 240 e OFF
+  0       -> Desliga ambos os motores
+  s       -> Mostra estado completo
+  c       -> Recalibra sensores Hall
+  h       -> Mostra ajuda
+  A=xxx   -> Define PWM manual do Motor A. Ex.: A=180
+  B=xxx   -> Define PWM manual do Motor B. Ex.: B=240
+*/
+
+#include <Arduino.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <math.h>
+
+// ============================================================
+// LCD I2C
+// ============================================================
+#define LCD_ADDRESS 0x27
+#define LCD_COLS 16
+#define LCD_ROWS 2
+
+#define SDA_PIN A3
+#define SCL_PIN A2
+
+LiquidCrystal_I2C lcd(LCD_ADDRESS, LCD_COLS, LCD_ROWS);
+
+// ============================================================
+// Driver L298N - Motor A
+// ============================================================
+#define PIN_ENA D2
+#define PIN_IN1 D5
+#define PIN_IN2 D6
+
+// ============================================================
+// Driver L298N - Motor B
+// ============================================================
+#define PIN_ENB D3
+#define PIN_IN3 D8
+#define PIN_IN4 D9
+
+// ============================================================
+// LEDs
+// ============================================================
+#define LED_MOTOR_A D11
+#define LED_MOTOR_B D12
+
+// ============================================================
+// Botões físicos
+// INPUT_PULLUP: premido = LOW; libertado = HIGH
+// ============================================================
+#define BOTAO_MOTOR_A D4
+#define BOTAO_MOTOR_B D7
+
+// ============================================================
+// Sensores de tensão
+// ============================================================
+#define SENSOR_TENSAO_A A7
+#define SENSOR_TENSAO_B A6
+
+// ============================================================
+// Sensores Hall
+// ============================================================
+#define SENSOR_HALL_A A1
+#define FAULT_HALL_A D10
+
+#define SENSOR_HALL_B A0
+#define FAULT_HALL_B D13
+
+#define FAULT_ATIVO LOW
+
+// ============================================================
+// ADC e conversões
+// ============================================================
+const float ADC_REF_V = 3.3f;
+const float ADC_MAX = 4095.0f;
+
+const float R1 = 30000.0f;
+const float R2 = 7500.0f;
+const float FATOR_DIVISOR = (R1 + R2) / R2;
+
+// ACS70331EESATR-005B3 ±5 A
+// Sensibilidade típica: 200 mV/A
+const float HALL_SENSIBILIDADE_V_A = 0.200f;
+
+const float CORRENTE_DEADBAND_A = 0.03f;
+const float LIMIAR_GERADOR_V = 1.0f;
+
+// ============================================================
+// PWM ESP32 - API clássica
+// ============================================================
+const uint32_t PWM_FREQ_HZ = 20000;
+const uint8_t PWM_RES_BITS = 8;
+const uint8_t PWM_DEFAULT = 240;
+const uint8_t PWM_MAX_VALUE = 255;
+
+const uint8_t PWM_CHANNEL_A = 0;
+const uint8_t PWM_CHANNEL_B = 1;
+
+// ============================================================
+// Temporizações
+// ============================================================
+const unsigned long INTERVALO_SERIAL_MS = 1000;
+const unsigned long INTERVALO_LCD_MS = 1000;
+const unsigned long INTERVALO_SENSORES_MS = 100;
+const unsigned long DEBOUNCE_MS = 50;
+
+// ============================================================
+// Estados
+// ============================================================
+enum EstadoMotor {
+  PARADO,
+  MOTOR,
+  GERADOR
+};
+
+struct DadosMotor {
+  uint8_t pwm;
+  float tensao;
+  float corrente;
+  float potencia;
+  EstadoMotor estado;
+};
+
+struct Sistema {
+  DadosMotor motorA;
+  DadosMotor motorB;
+  bool faultA;
+  bool faultB;
+};
+
+struct BotaoDebounce {
+  int pin;
+  bool leituraAnterior;
+  bool estadoEstavel;
+  unsigned long instanteMudanca;
+};
+
+// ============================================================
+// Variáveis globais
+// ============================================================
+Sistema sistema;
+
+float offsetHallA_V = 1.5f;
+float offsetHallB_V = 1.5f;
+
+float correnteFiltradaA = 0.0f;
+float correnteFiltradaB = 0.0f;
+
+BotaoDebounce botaoA = { BOTAO_MOTOR_A, HIGH, HIGH, 0 };
+BotaoDebounce botaoB = { BOTAO_MOTOR_B, HIGH, HIGH, 0 };
+
+unsigned long ultimoSerialMs = 0;
+unsigned long ultimoLcdMs = 0;
+unsigned long ultimoSensoresMs = 0;
+
+uint8_t paginaLCD = 0;
+
+String bufferSerial = "";
+
+// ============================================================
+// Protótipos
+// ============================================================
+void configurarHardware();
+void configurarPWM();
+
+void calibrarHall();
+void atualizarBotoes();
+void atualizarSerial();
+void atualizarSensores();
+void atualizarLCD(bool forcar = false);
+
+void imprimirEstadoCompleto();
+void mostrarAjudaSerial();
+
+void alternarMotorA();
+void alternarMotorB();
+void desligarAmbosMotores();
+
+void aplicarMotorA(uint8_t pwm);
+void aplicarMotorB(uint8_t pwm);
+
+float lerTensaoMotor(int pin);
+float lerCorrenteHall(int pinHall, float offset_V);
+
+bool botaoFoiPremido(BotaoDebounce &b);
+
+EstadoMotor obterEstadoMotor(uint8_t pwm, float tensao);
+const char *estadoParaTexto(EstadoMotor estado);
+
+void escreverLinhaLCD(uint8_t linha, const char *texto);
+void processarComando(String comando);
+
+// ============================================================
+// SETUP
+// ============================================================
+void setup() {
+  Serial.begin(115200);
+
+  configurarHardware();
+  configurarPWM();
+
+  lcd.clear();
+  escreverLinhaLCD(0, "Motor/Gerador");
+  escreverLinhaLCD(1, "A iniciar...");
+
+  desligarAmbosMotores();
+  calibrarHall();
+  atualizarSensores();
+
+  lcd.clear();
+  escreverLinhaLCD(0, "Sistema pronto");
+  escreverLinhaLCD(1, "Serial 115200");
+
+  mostrarAjudaSerial();
+  imprimirEstadoCompleto();
+}
+
+// ============================================================
+// LOOP PRINCIPAL
+// ============================================================
+void loop() {
+  atualizarBotoes();
+  atualizarSerial();
+
+  unsigned long agora = millis();
+
+  if (agora - ultimoSensoresMs >= INTERVALO_SENSORES_MS) {
+    ultimoSensoresMs = agora;
+    atualizarSensores();
+  }
+
+  if (agora - ultimoLcdMs >= INTERVALO_LCD_MS) {
+    ultimoLcdMs = agora;
+    atualizarLCD();
+  }
+
+  if (agora - ultimoSerialMs >= INTERVALO_SERIAL_MS) {
+    ultimoSerialMs = agora;
+    imprimirEstadoCompleto();
+  }
+}
+
+// ============================================================
+// CONFIGURAÇÃO DE HARDWARE
+// ============================================================
+void configurarHardware() {
+#if defined(ESP32)
+  analogReadResolution(12);
+#endif
+
+  Wire.begin(SDA_PIN, SCL_PIN);
+  lcd.init();
+  lcd.backlight();
+
+  pinMode(PIN_ENA, OUTPUT);
+  pinMode(PIN_IN1, OUTPUT);
+  pinMode(PIN_IN2, OUTPUT);
+
+  pinMode(PIN_ENB, OUTPUT);
+  pinMode(PIN_IN3, OUTPUT);
+  pinMode(PIN_IN4, OUTPUT);
+
+  pinMode(LED_MOTOR_A, OUTPUT);
+  pinMode(LED_MOTOR_B, OUTPUT);
+
+  pinMode(BOTAO_MOTOR_A, INPUT_PULLUP);
+  pinMode(BOTAO_MOTOR_B, INPUT_PULLUP);
+
+  pinMode(SENSOR_TENSAO_A, INPUT);
+  pinMode(SENSOR_TENSAO_B, INPUT);
+  pinMode(SENSOR_HALL_A, INPUT);
+  pinMode(SENSOR_HALL_B, INPUT);
+
+  pinMode(FAULT_HALL_A, INPUT_PULLUP);
+  pinMode(FAULT_HALL_B, INPUT_PULLUP);
+
+  digitalWrite(LED_MOTOR_A, LOW);
+  digitalWrite(LED_MOTOR_B, LOW);
+}
+
+// ============================================================
+// CONFIGURAÇÃO PWM
+// ============================================================
+void configurarPWM() {
+#if defined(ESP32)
+  ledcSetup(PWM_CHANNEL_A, PWM_FREQ_HZ, PWM_RES_BITS);
+  ledcSetup(PWM_CHANNEL_B, PWM_FREQ_HZ, PWM_RES_BITS);
+
+  ledcAttachPin(PIN_ENA, PWM_CHANNEL_A);
+  ledcAttachPin(PIN_ENB, PWM_CHANNEL_B);
+
+  ledcWrite(PWM_CHANNEL_A, 0);
+  ledcWrite(PWM_CHANNEL_B, 0);
+#else
+  pinMode(PIN_ENA, OUTPUT);
+  pinMode(PIN_ENB, OUTPUT);
+
+  analogWrite(PIN_ENA, 0);
+  analogWrite(PIN_ENB, 0);
+#endif
+}
+
+// ============================================================
+// CONTROLO DOS MOTORES
+// ============================================================
+void aplicarMotorA(uint8_t pwm) {
+  sistema.motorA.pwm = constrain(pwm, 0, PWM_MAX_VALUE);
+
+  if (sistema.motorA.pwm == 0) {
+#if defined(ESP32)
+    ledcWrite(PWM_CHANNEL_A, 0);
+#else
+    analogWrite(PIN_ENA, 0);
+#endif
+
+    digitalWrite(PIN_IN1, LOW);
+    digitalWrite(PIN_IN2, LOW);
+    digitalWrite(LED_MOTOR_A, LOW);
+  } else {
+    digitalWrite(PIN_IN1, HIGH);
+    digitalWrite(PIN_IN2, LOW);
+
+#if defined(ESP32)
+    ledcWrite(PWM_CHANNEL_A, sistema.motorA.pwm);
+#else
+    analogWrite(PIN_ENA, sistema.motorA.pwm);
+#endif
+
+    digitalWrite(LED_MOTOR_A, HIGH);
+  }
+}
+
+void aplicarMotorB(uint8_t pwm) {
+  sistema.motorB.pwm = constrain(pwm, 0, PWM_MAX_VALUE);
+
+  if (sistema.motorB.pwm == 0) {
+#if defined(ESP32)
+    ledcWrite(PWM_CHANNEL_B, 0);
+#else
+    analogWrite(PIN_ENB, 0);
+#endif
+
+    digitalWrite(PIN_IN3, LOW);
+    digitalWrite(PIN_IN4, LOW);
+    digitalWrite(LED_MOTOR_B, LOW);
+  } else {
+    digitalWrite(PIN_IN3, HIGH);
+    digitalWrite(PIN_IN4, LOW);
+
+#if defined(ESP32)
+    ledcWrite(PWM_CHANNEL_B, sistema.motorB.pwm);
+#else
+    analogWrite(PIN_ENB, sistema.motorB.pwm);
+#endif
+
+    digitalWrite(LED_MOTOR_B, HIGH);
+  }
+}
+
+void alternarMotorA() {
+  if (sistema.motorA.pwm == 0) {
+    aplicarMotorA(PWM_DEFAULT);
+  } else {
+    aplicarMotorA(0);
+  }
+
+  atualizarSensores();
+  atualizarLCD(true);
+  imprimirEstadoCompleto();
+}
+
+void alternarMotorB() {
+  if (sistema.motorB.pwm == 0) {
+    aplicarMotorB(PWM_DEFAULT);
+  } else {
+    aplicarMotorB(0);
+  }
+
+  atualizarSensores();
+  atualizarLCD(true);
+  imprimirEstadoCompleto();
+}
+
+void desligarAmbosMotores() {
+  aplicarMotorA(0);
+  aplicarMotorB(0);
+}
+
+// ============================================================
+// BOTÕES COM DEBOUNCE
+// ============================================================
+void atualizarBotoes() {
+  if (botaoFoiPremido(botaoA)) {
+    alternarMotorA();
+  }
+
+  if (botaoFoiPremido(botaoB)) {
+    alternarMotorB();
+  }
+}
+
+bool botaoFoiPremido(BotaoDebounce &b) {
+  bool leituraAtual = digitalRead(b.pin);
+  unsigned long agora = millis();
+
+  if (leituraAtual != b.leituraAnterior) {
+    b.instanteMudanca = agora;
+    b.leituraAnterior = leituraAtual;
+  }
+
+  if ((agora - b.instanteMudanca) > DEBOUNCE_MS) {
+    if (leituraAtual != b.estadoEstavel) {
+      b.estadoEstavel = leituraAtual;
+
+      if (b.estadoEstavel == LOW) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+// ============================================================
+// LEITURA DOS SENSORES
+// ============================================================
+int lerADCMedio(int pin, uint8_t amostras = 16) {
+  uint32_t soma = 0;
+
+  for (uint8_t i = 0; i < amostras; i++) {
+    soma += analogRead(pin);
+  }
+
+  return soma / amostras;
+}
+
+float lerTensaoADC(int pin) {
+  int adc = lerADCMedio(pin);
+  return (adc * ADC_REF_V) / ADC_MAX;
+}
+
+float lerTensaoMotor(int pin) {
+  return lerTensaoADC(pin) * FATOR_DIVISOR;
+}
+
+float lerCorrenteHall(int pinHall, float offset_V) {
+  float vHall = lerTensaoADC(pinHall);
+  float corrente = (vHall - offset_V) / HALL_SENSIBILIDADE_V_A;
+
+  if (fabs(corrente) < CORRENTE_DEADBAND_A) {
+    corrente = 0.0f;
+  }
+
+  return corrente;
+}
+
+void calibrarHall() {
+  const uint16_t amostras = 500;
+
+  float somaA = 0.0f;
+  float somaB = 0.0f;
+
+  desligarAmbosMotores();
+
+  Serial.println();
+  Serial.println("A calibrar sensores Hall...");
+  Serial.println("Garante que os motores estao parados e sem corrente.");
+
+  lcd.clear();
+  escreverLinhaLCD(0, "Calibracao Hall");
+  escreverLinhaLCD(1, "Motores OFF");
+
+  unsigned long proximaAmostra = millis();
+
+  for (uint16_t i = 0; i < amostras; i++) {
+    while (millis() < proximaAmostra) {
+      yield();
+    }
+
+    proximaAmostra += 2;
+
+    somaA += lerTensaoADC(SENSOR_HALL_A);
+    somaB += lerTensaoADC(SENSOR_HALL_B);
+  }
+
+  offsetHallA_V = somaA / amostras;
+  offsetHallB_V = somaB / amostras;
+
+  correnteFiltradaA = 0.0f;
+  correnteFiltradaB = 0.0f;
+
+  Serial.print("Offset Hall A: ");
+  Serial.print(offsetHallA_V, 4);
+  Serial.println(" V");
+
+  Serial.print("Offset Hall B: ");
+  Serial.print(offsetHallB_V, 4);
+  Serial.println(" V");
+}
+
+void atualizarSensores() {
+  sistema.motorA.tensao = lerTensaoMotor(SENSOR_TENSAO_A);
+  sistema.motorB.tensao = lerTensaoMotor(SENSOR_TENSAO_B);
+
+  float correnteNovaA = lerCorrenteHall(SENSOR_HALL_A, offsetHallA_V);
+  float correnteNovaB = lerCorrenteHall(SENSOR_HALL_B, offsetHallB_V);
+
+  correnteFiltradaA = 0.90f * correnteFiltradaA + 0.10f * correnteNovaA;
+  correnteFiltradaB = 0.90f * correnteFiltradaB + 0.10f * correnteNovaB;
+
+  if (fabs(correnteFiltradaA) < CORRENTE_DEADBAND_A) {
+    correnteFiltradaA = 0.0f;
+  }
+
+  if (fabs(correnteFiltradaB) < CORRENTE_DEADBAND_A) {
+    correnteFiltradaB = 0.0f;
+  }
+
+  sistema.motorA.corrente = correnteFiltradaA;
+  sistema.motorB.corrente = correnteFiltradaB;
+
+  sistema.motorA.potencia = sistema.motorA.tensao * sistema.motorA.corrente;
+  sistema.motorB.potencia = sistema.motorB.tensao * sistema.motorB.corrente;
+
+  sistema.motorA.estado = obterEstadoMotor(sistema.motorA.pwm, sistema.motorA.tensao);
+  sistema.motorB.estado = obterEstadoMotor(sistema.motorB.pwm, sistema.motorB.tensao);
+
+  sistema.faultA = digitalRead(FAULT_HALL_A) == FAULT_ATIVO;
+  sistema.faultB = digitalRead(FAULT_HALL_B) == FAULT_ATIVO;
+}
+
+// ============================================================
+// ESTADO DO MOTOR
+// ============================================================
+EstadoMotor obterEstadoMotor(uint8_t pwm, float tensao) {
+  if (pwm > 0) {
+    return MOTOR;
+  }
+
+  if (tensao > LIMIAR_GERADOR_V) {
+    return GERADOR;
+  }
+
+  return PARADO;
+}
+
+const char *estadoParaTexto(EstadoMotor estado) {
+  switch (estado) {
+    case MOTOR:
+      return "MOTOR";
+
+    case GERADOR:
+      return "GERADOR";
+
+    case PARADO:
+      return "PARADO";
+
+    default:
+      return "?";
+  }
+}
+
+// ============================================================
+// SERIAL
+// ============================================================
+void atualizarSerial() {
+  while (Serial.available() > 0) {
+    char c = Serial.read();
+
+    if (c == '\n' || c == '\r') {
+      if (bufferSerial.length() > 0) {
+        processarComando(bufferSerial);
+        bufferSerial = "";
+      }
+    } else {
+      bufferSerial += c;
+
+      if (bufferSerial.length() == 1) {
+        char cmd = bufferSerial.charAt(0);
+
+        if (cmd == '0' || cmd == '1' || cmd == '2' ||
+            cmd == 's' || cmd == 'S' ||
+            cmd == 'c' || cmd == 'C' ||
+            cmd == 'h' || cmd == 'H') {
+          processarComando(bufferSerial);
+          bufferSerial = "";
+        }
+      }
+
+      if (bufferSerial.length() > 20) {
+        bufferSerial = "";
+      }
+    }
+  }
+}
+
+void processarComando(String comando) {
+  comando.trim();
+  comando.toUpperCase();
+
+  if (comando.length() == 0) {
+    return;
+  }
+
+  if (comando == "1") {
+    alternarMotorA();
+    return;
+  }
+
+  if (comando == "2") {
+    alternarMotorB();
+    return;
+  }
+
+  if (comando == "0") {
+    desligarAmbosMotores();
+    atualizarSensores();
+    atualizarLCD(true);
+    imprimirEstadoCompleto();
+    return;
+  }
+
+  if (comando == "S") {
+    atualizarSensores();
+    imprimirEstadoCompleto();
+    return;
+  }
+
+  if (comando == "C") {
+    calibrarHall();
+    atualizarSensores();
+    atualizarLCD(true);
+    imprimirEstadoCompleto();
+    return;
+  }
+
+  if (comando == "H") {
+    mostrarAjudaSerial();
+    return;
+  }
+
+  if (comando.startsWith("A=") || comando.startsWith("A ")) {
+    int pwm = comando.substring(2).toInt();
+    pwm = constrain(pwm, 0, 255);
+
+    aplicarMotorA((uint8_t)pwm);
+
+    atualizarSensores();
+    atualizarLCD(true);
+    imprimirEstadoCompleto();
+    return;
+  }
+
+  if (comando.startsWith("B=") || comando.startsWith("B ")) {
+    int pwm = comando.substring(2).toInt();
+    pwm = constrain(pwm, 0, 255);
+
+    aplicarMotorB((uint8_t)pwm);
+
+    atualizarSensores();
+    atualizarLCD(true);
+    imprimirEstadoCompleto();
+    return;
+  }
+
+  Serial.print("Comando desconhecido: ");
+  Serial.println(comando);
+  mostrarAjudaSerial();
+}
+
+void mostrarAjudaSerial() {
+  Serial.println();
+  Serial.println("================ COMANDOS ================");
+  Serial.println("1     -> Alterna Motor A: PWM 240 / OFF");
+  Serial.println("2     -> Alterna Motor B: PWM 240 / OFF");
+  Serial.println("0     -> Desliga ambos os motores");
+  Serial.println("s     -> Mostra estado completo agora");
+  Serial.println("c     -> Recalibra sensores Hall");
+  Serial.println("h     -> Mostra este menu");
+  Serial.println("A=xxx -> Define PWM Motor A. Ex.: A=180");
+  Serial.println("B=xxx -> Define PWM Motor B. Ex.: B=240");
+  Serial.println("==========================================");
+}
+
+void imprimirEstadoCompleto() {
+  Serial.println();
+  Serial.println("================================================");
+
+  Serial.println("MOTOR A");
+  Serial.print("Estado : ");
+  Serial.println(estadoParaTexto(sistema.motorA.estado));
+
+  Serial.print("PWM : ");
+  Serial.println(sistema.motorA.pwm);
+
+  Serial.print("Tensao : ");
+  Serial.print(sistema.motorA.tensao, 2);
+  Serial.println(" V");
+
+  Serial.print("Corrente : ");
+  Serial.print(sistema.motorA.corrente, 3);
+  Serial.println(" A");
+
+  Serial.print("Potencia : ");
+  Serial.print(sistema.motorA.potencia, 2);
+  Serial.println(" W");
+
+  Serial.println();
+
+  Serial.println("MOTOR B");
+  Serial.print("Estado : ");
+  Serial.println(estadoParaTexto(sistema.motorB.estado));
+
+  Serial.print("PWM : ");
+  Serial.println(sistema.motorB.pwm);
+
+  Serial.print("Tensao : ");
+  Serial.print(sistema.motorB.tensao, 2);
+  Serial.println(" V");
+
+  Serial.print("Corrente : ");
+  Serial.print(sistema.motorB.corrente, 3);
+  Serial.println(" A");
+
+  Serial.print("Potencia : ");
+  Serial.print(sistema.motorB.potencia, 2);
+  Serial.println(" W");
+
+  Serial.println();
+
+  Serial.print("FAULT A : ");
+  Serial.println(sistema.faultA ? "FAULT A" : "OK");
+
+  Serial.print("FAULT B : ");
+  Serial.println(sistema.faultB ? "FAULT B" : "OK");
+
+  Serial.println("================================================");
+}
+
+// ============================================================
+// LCD
+// ============================================================
+void atualizarLCD(bool forcar) {
+  static uint8_t ultimaPagina = 255;
+  static bool ultimoFaultA = false;
+  static bool ultimoFaultB = false;
+
+  if (!forcar) {
+    paginaLCD = (paginaLCD + 1) % 4;
+  }
+
+  if (forcar ||
+      paginaLCD != ultimaPagina ||
+      sistema.faultA != ultimoFaultA ||
+      sistema.faultB != ultimoFaultB) {
+    lcd.clear();
+
+    ultimaPagina = paginaLCD;
+    ultimoFaultA = sistema.faultA;
+    ultimoFaultB = sistema.faultB;
+  }
+
+  char linha1[17];
+  char linha2[17];
+
+  const char *faultTxt = "";
+
+  if (sistema.faultA && sistema.faultB) {
+    faultTxt = "FAULT A+B";
+  } else if (sistema.faultA) {
+    faultTxt = "FAULT A";
+  } else if (sistema.faultB) {
+    faultTxt = "FAULT B";
+  }
+
+  switch (paginaLCD) {
+    case 0:
+      snprintf(linha1, sizeof(linha1), "A:%s", estadoParaTexto(sistema.motorA.estado));
+      snprintf(linha2, sizeof(linha2), "PWM A:%3d", sistema.motorA.pwm);
+      break;
+
+    case 1:
+      snprintf(linha1, sizeof(linha1), "A %4.1fV %5.2fA", sistema.motorA.tensao, sistema.motorA.corrente);
+      snprintf(linha2, sizeof(linha2), "P A:%7.2fW", sistema.motorA.potencia);
+      break;
+
+    case 2:
+      snprintf(linha1, sizeof(linha1), "B:%s", estadoParaTexto(sistema.motorB.estado));
+      snprintf(linha2, sizeof(linha2), "PWM B:%3d", sistema.motorB.pwm);
+      break;
+
+    case 3:
+    default:
+      snprintf(linha1, sizeof(linha1), "B %4.1fV %5.2fA", sistema.motorB.tensao, sistema.motorB.corrente);
+      snprintf(linha2, sizeof(linha2), "P B:%7.2fW", sistema.motorB.potencia);
+      break;
+  }
+
+  escreverLinhaLCD(0, linha1);
+
+  if (strlen(faultTxt) > 0 && (paginaLCD == 1 || paginaLCD == 3)) {
+    escreverLinhaLCD(1, faultTxt);
+  } else {
+    escreverLinhaLCD(1, linha2);
+  }
+}
+
+void escreverLinhaLCD(uint8_t linha, const char *texto) {
+  lcd.setCursor(0, linha);
+
+  uint8_t i = 0;
+
+  while (texto[i] != '\0' && i < LCD_COLS) {
+    lcd.print(texto[i]);
+    i++;
+  }
+
+  while (i < LCD_COLS) {
+    lcd.print(' ');
+    i++;
+  }
+}
