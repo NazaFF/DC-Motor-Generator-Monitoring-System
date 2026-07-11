@@ -4,8 +4,7 @@
 
 ![Project Status](https://img.shields.io/badge/Status-Completed-success)
 
-<img width="1536" height="2048" alt="WhatsApp Image 2026-07-11 at 16 36 12 (1)" src="https://github.com/user-attachments/assets/b15caf7b-5eb3-4511-9c9f-6704e003cbb4" />
-
+<img width="1536" height="2048" alt="WhatsApp Image 2026-07-11 at 16 36 11" src="https://github.com/user-attachments/assets/bcb6544f-d900-47cd-97e0-d10b72d2f42c" />
 
 ![Platform](https://img.shields.io/badge/Platform-Arduino%20Nano%20ESP32-blue)
 
@@ -13,7 +12,9 @@
 
 ![Language](https://img.shields.io/badge/Language-C%2B%2B-orange)
 
-<img width="1536" height="2048" alt="WhatsApp Image 2026-07-11 at 16 36 11" src="https://github.com/user-attachments/assets/bcb6544f-d900-47cd-97e0-d10b72d2f42c" />
+
+<img width="1536" height="2048" alt="WhatsApp Image 2026-07-11 at 16 36 12 (1)" src="https://github.com/user-attachments/assets/b15caf7b-5eb3-4511-9c9f-6704e003cbb4" />
+
 
 ![License](https://img.shields.io/badge/License-MIT-green)
 
