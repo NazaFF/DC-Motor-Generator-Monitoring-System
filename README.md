@@ -312,9 +312,7 @@ This project is released under the MIT License.
 
 **Tomás Ferreira**
 
-Electrical & Telecommunications Engineering Student
-
-University of Aveiro
+Electrical & Telecommunications Engineer
 
 Interested in:
 
@@ -361,7 +359,7 @@ Areas of Interest:
 - Email: ferreiratomas994@gmail.com
 - Outlkook tomasff52@ua.pt
 - LinkedIn: (https://www.linkedin.com/in/tomas-ferreira-52635a2b8/?isSelfProfile=true)
-- GitHub: https://github.com/teu-utilizador
+
 
 
 
