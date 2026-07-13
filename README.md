@@ -302,32 +302,6 @@ Possible future developments include:
 
 ---
 
-# Gallery
-
-## Breadboard Prototype
-
-*(Insert Image)*
-
----
-
-## PCB Assembly
-
-*(Insert Image)*
-
----
-
-## Final Prototype
-
-*(Insert Image)*
-
----
-
-## Testing
-
-*(Insert Image)*
-
----
-
 # License
 
 This project is released under the MIT License.
